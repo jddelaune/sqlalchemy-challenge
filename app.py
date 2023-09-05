@@ -7,6 +7,9 @@ from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy import create_engine, func, desc
 
+# SQLAlchemy 2.0 has a new way of doing queries and maintains the query object as a legacy construct, see
+# https://docs.sqlalchemy.org/en/20/orm/queryguide/query.html#sqlalchemy.orm.Query and consider updating this
+# code to the new way later when time permits.
 
 #################################################
 # Database Setup
@@ -29,6 +32,25 @@ Station = Base.classes.station
 Session = sessionmaker(engine)
 
 #################################################
+# Functions
+#################################################
+
+def most_recent_date():
+    """Return the most recent date in the database that an observation was taken."""
+
+    with Session() as session:
+        first_row = session.query(Measurement.date).order_by(desc(Measurement.date)).limit(1)
+        latest_date = dt.date.fromisoformat(first_row.scalar())
+
+    return latest_date
+
+def one_year_prev(date):
+    """Return the date one year (365 days) before the date given."""
+
+    one_year_prev_date = date - dt.timedelta(days=365)
+    return one_year_prev_date
+
+#################################################
 # Flask Setup
 #################################################
 # define the flask object
@@ -38,16 +60,52 @@ app = Flask(__name__)
 # Flask Routes
 #################################################
 
-# /api/v1.0/tobs
+@app.route("/api/v1.0/tobs")
+def tobs():
+    """Query the dates and temperature observations of the most-active station for the previous year of data. 
+    Return a JSON list of temperature observations for the previous year."""
+    with Session() as session:
+        
+        # Find date one year from latest date in dataset
+        latest_date = most_recent_date()
+        start_date = one_year_prev(latest_date)
 
-    # Query the dates and temperature observations of the most-active station for the previous year of data.
+        # find most active station
+        active_stations_query = session.query(Measurement.station, func.count(Measurement.station))\
+            .group_by(Measurement.station)\
+            .order_by(func.count(Measurement.station).desc()).all()
 
-    # Return a JSON list of temperature observations for the previous year.
+        most_active_station = active_stations_query[0][0]
 
-# /api/v1.0/<start> and /api/v1.0/<start>/<end>
+        year_temps_query = session.query(Measurement.date, Measurement.tobs)\
+            .filter(Measurement.date >= start_date)\
+            .filter(Measurement.station == most_active_station)\
+            .all()
 
-    # Return a JSON list of the minimum temperature, the average temperature, and the maximum temperature
-    # for a specified start or start-end range.
+    tobs_list = [{'station': most_active_station}]
+
+    for i in year_temps_query:
+        temps_dict = {}
+        temps_dict.update({'date': i[0], 'temperature': i[1]})
+        tobs_list.append(temps_dict)
+        
+    return jsonify(tobs_list)
+
+@app.route("/api/v1.0/tstats/<start_date>")
+@app.route("/api/v1.0/tstats/<start_date>/<end_date>")
+def tstats(start_date, end_date=str(most_recent_date())):
+    """Return a JSON list of the minimum temperature, the average temperature, and the maximum temperature
+    from a specified start date to the most recent date in the database."""
+    print(end_date)
+    print(str(type(end_date)))
+    with Session() as session:
+        tstats_result = session.query(
+            func.min(Measurement.tobs), func.max(Measurement.tobs), func.avg(Measurement.tobs))\
+            .filter(Measurement.date >= start_date)\
+            .filter(Measurement.date <= end_date)\
+            .first()
+
+    return jsonify(tuple(tstats_result))    
 
     # For a specified start, calculate TMIN, TAVG, and TMAX for all the dates greater than or equal to the start date.
 
@@ -59,12 +117,9 @@ def precip():
     """Return the most recent year's worth of daily precipitation data from the dataset in JSON format"""
     with Session() as session:
         
-        # Get most recent date in dataset
-        first_row = session.query(Measurement.date).order_by(desc(Measurement.date)).limit(1)
-        latest_date = dt.date.fromisoformat(first_row.scalar())
-        
-        # Calculate date one year from latest date in dataset
-        start_date = latest_date - dt.timedelta(days=365)
+        # Find date one year from latest date in dataset
+        latest_date = most_recent_date()
+        start_date = one_year_prev(latest_date)
         
         # Perform a query to retrieve the data and precipitation scores
         last_year_precip = session.query(Measurement.date, func.avg(Measurement.prcp))\
